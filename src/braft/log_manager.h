@@ -21,6 +21,7 @@
 #include <butil/macros.h>                        // BAIDU_CACHELINE_ALIGNMENT
 #include <butil/containers/flat_map.h>           // butil::FlatMap
 #include <deque>                                // std::deque
+#include <gflags/gflags.h>
 #include <bthread/execution_queue.h>            // bthread::ExecutionQueueId
 
 #include "braft/raft.h"                          // Closure
@@ -82,7 +83,7 @@ public:
 
     // Notify the log manager about the latest snapshot, which indicates the
     // logs which can be safely truncated.
-    BRAFT_MOCK void set_snapshot(const SnapshotMeta* meta);
+    BRAFT_MOCK void set_snapshot(const SnapshotMeta* meta, const int64_t first_snapshot_index);
 
     // We don't delete all the logs before last snapshot to avoid installing
     // snapshot on slow replica. Call this method to drop all the logs before
@@ -93,6 +94,12 @@ public:
     // Returns:
     //  success return ptr, fail return null
     LogEntry* get_entry(const int64_t index);
+
+    // Get the |count| logs start with |index|
+    // Returns:
+    //  success return log entries' num, fail return 0
+    int get_entries(const int64_t &fisrt_index, const int& count, const size_t& max_size,
+                    std::vector<LogEntry* >* log_entries);
 
     // Get the log term at |index|
     // Returns:
@@ -143,11 +150,14 @@ public:
     //     [first_log_index-1, last_log_index]
     // Returns butil::Status::OK if valid, a specific error otherwise
     butil::Status check_consistency();
+    butil::Status check_snapshot_consistency(const LogId &last_snapshot_id);
 
     void describe(std::ostream& os, bool use_html);
 
     // Get the internal status of LogManager.
     void get_status(LogManagerStatus* status);
+    void reset_applied_id();
+    void clear_logs(LogId *logid);
 
 private:
 friend class AppendBatcher;
@@ -176,6 +186,9 @@ friend class AppendBatcher;
     void set_disk_id(const LogId& disk_id);
 
     LogEntry* get_entry_from_memory(const int64_t index);
+
+    int get_entries_from_memory(const int64_t& first_index, const int& count,
+                                std::deque<LogEntry *> *log_entries);
 
     WaitId notify_on_new_log(int64_t expected_last_log_index, WaitMeta* wm);
 

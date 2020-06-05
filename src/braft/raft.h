@@ -64,6 +64,7 @@ class Error {
 public:
     Error() : _type(ERROR_TYPE_NONE) {}
     Error(const Error& e) : _type(e._type), _st(e._st) {}
+    Error(ErrorType type, const butil::Status& st) : _type(type), _st(st) {}
     ErrorType type() const { return _type; }
     const butil::Status& status() const { return _st; }
     butil::Status& status() { return _st; }
@@ -92,6 +93,8 @@ inline const char* errortype2str(ErrorType t) {
         return "SnapshotError";
     case ERROR_TYPE_STATE_MACHINE:
         return "StateMachineError";
+    case ERROR_TYPE_LEARNER:
+        return "LearnerError";
     }
     return "Unknown";
 }
@@ -216,6 +219,7 @@ public:
 
     // user defined snapshot generate function, this method will block on_apply.
     // user can make snapshot async when fsm can be cow(copy-on-write).
+    // use can fetch snapshot from learner.
     // call done->Run() when snapshot finished.
     // success return 0, fail return errno
     // Default: Save nothing and returns error.
@@ -227,6 +231,12 @@ public:
     // success return 0, fail return errno
     // Default: Load nothing and returns error.
     virtual int on_snapshot_load(::braft::SnapshotReader* reader);
+
+    // user defined function to confirm fetched snapshot could be acceptted.
+    // get and accept fetched snapshot
+    // success return 0, fail return errno
+    // Default: Do nothing and returns error.
+    virtual int on_snapshot_fetched(::braft::SnapshotReader* reader);
 
     // Invoked when the belonging node becomes the leader of the group at |term|
     // Default: Do nothing
@@ -265,6 +275,10 @@ public:
     // the very leader whom the follower starts to follow.
     // User can reset the node's information as it starts to follow some leader.
     virtual void on_start_following(const ::braft::LeaderChangeContext& ctx);
+    
+    // this method is called when a learner need clear applied memory.
+    // user defined funtion to reset the applied memory in learner mode.
+    virtual void on_reset();
 };
 
 enum State {
@@ -273,15 +287,16 @@ enum State {
     STATE_TRANSFERRING = 2,
     STATE_CANDIDATE = 3,
     STATE_FOLLOWER = 4,
-    STATE_ERROR = 5,
-    STATE_UNINITIALIZED = 6,
-    STATE_SHUTTING = 7,
-    STATE_SHUTDOWN = 8,
+    STATE_LEARNER = 5,
+    STATE_ERROR = 6,
+    STATE_UNINITIALIZED = 7,
+    STATE_SHUTTING = 8,
+    STATE_SHUTDOWN = 9,
     STATE_END,
 };
 
 inline const char* state2str(State state) {
-    const char* str[] = {"LEADER", "TRANSFERRING", "CANDIDATE", "FOLLOWER", 
+    const char* str[] = {"LEADER", "TRANSFERRING", "CANDIDATE", "FOLLOWER", "LEARNER",
                          "ERROR", "UNINITIALIZED", "SHUTTING", "SHUTDOWN", };
     if (state < STATE_END) {
         return str[(int)state - 1];
@@ -330,21 +345,26 @@ class UserLog {
     DISALLOW_COPY_AND_ASSIGN(UserLog);
 public:
     UserLog() {};
-    UserLog(int64_t log_index, const butil::IOBuf& log_data)
+    UserLog(int64_t log_index, int64_t log_term, const butil::IOBuf& log_data)
         : _index(log_index)
+        , _term(log_term)
         , _data(log_data)
     {};
     int64_t log_index() const { return _index; }
+    int64_t log_term() const { return _term; }
     const butil::IOBuf& log_data() const { return _data; }
     void set_log_index(const int64_t log_index) { _index = log_index; }
+    void set_log_term(const int64_t log_term) { _term = log_term; }
     void set_log_data(const butil::IOBuf& log_data) { _data = log_data; }
     void reset() {
         _index = 0;
+        _term = 0;
         _data.clear();
     }
 
 private:
     int64_t _index;
+    int64_t _term;
     butil::IOBuf _data;
 };
 
@@ -379,7 +399,7 @@ struct NodeStatus {
     NodeStatus()
         : state(STATE_END), readonly(false), term(0), committed_index(0), known_applied_index(0)
         , pending_index(0), pending_queue_size(0), applying_index(0), first_index(0)
-        , last_index(-1), disk_index(0)
+        , last_index(-1), disk_index(0), last_snapshot_index(0)
     {}
 
     State state;
@@ -421,6 +441,9 @@ struct NodeStatus {
 
     // The max log in disk.
     int64_t disk_index;
+
+    // The last snapshot of the node.
+    int64_t last_snapshot_index;
 
     // Stable followers are peers in current configuration.
     // If the node is not leader, this map is empty.
@@ -588,6 +611,26 @@ struct NodeOptions {
     // Default: false
     bool disable_cli;
 
+    // Learner fetch log every |fetch_log_interval_ms| milliseconds.
+    // The max throughput per time for fetching log is definded as raft_max_body_size
+    // and its default value is 512 * 1024 (byte), so the max throughput bandwidth(bytes/s) for
+    // fetching log can be calculated as |1000 / fetch_log_interval_ms * raft_max_body_size|.
+    // User can reset this value to control the fetching log bandwidth.
+
+    // Default: 5 (5ms)
+    int fetch_log_interval_ms;
+
+    // Learner retry to choose peer when unable to fetch log
+    // in |fetch_log_timeout_s| seconds.
+
+    // Default: 60 (60s)
+    int fetch_log_timeout_s;
+
+    // Learner load snapshot in boot
+    // If false, Learner does not load snapshot and apply logs.
+    // Default: true
+    bool learner_auto_load_applied_logs;
+
     // Construct a default instance
     NodeOptions();
 
@@ -609,6 +652,9 @@ inline NodeOptions::NodeOptions()
     , snapshot_file_system_adaptor(NULL)
     , snapshot_throttle(NULL)
     , disable_cli(false)
+    , fetch_log_interval_ms(5)
+    , fetch_log_timeout_s(60)
+    , learner_auto_load_applied_logs(false)
 {}
 
 inline int NodeOptions::get_catchup_timeout_ms() {
@@ -693,8 +739,12 @@ public:
     // case, BE CAREFULE when dealing with this method.
     butil::Status reset_peers(const Configuration& new_peers);
 
-    // Start a snapshot immediately if possible. done->Run() would be invoked
-    // when the snapshot finishes, describing the detailed result.
+    // user trigger snapshot
+    // done is user defined function, maybe response to client
+    // User can choose to save local snapshot or fetch remote snapshot from learner
+    // in on_snapshot_save fsm function. Two methods about fetching remote snapshot,
+    // |fetch_snapshot| for fetching, |cancel| for canceling the fetching task and you
+    // can find them in |snapshot_fetcher.h|.
     void snapshot(Closure* done);
 
     // user trigger vote
@@ -818,6 +868,56 @@ struct BootstrapOptions {
 
 };
 
+class LearnerImpl;
+class Learner {
+public:
+    Learner(const GroupId& group_id, const PeerId& peer_id);
+    virtual ~Learner();
+
+    // get node id
+    NodeId node_id();
+
+    // init node
+    int init(const NodeOptions& options);
+
+    // shutdown local replica.
+    // done is user defined function, maybe response to client or clean some resource
+    // [NOTE] code after apply can't access resource in done
+    void shutdown(Closure* done);
+
+    // Block the thread until the node is successfully stopped.
+    void join();
+
+    // user trigger snapshot
+    // done is user defined function, maybe response to client
+    // User can choose to save local snapshot or fetch remote snapshot
+    // in on_snapshot_save fsm function. Two methods about fetching remote snapshot,
+    // |fetch_snapshot| for fetching, |cancel| for canceling the fetching task and you
+    // can find them in snapshot_fetcher.h
+    void snapshot(Closure* done);
+
+    // user set read barrier index.
+    // Learner stops applying tasks when exceeds barrier index.
+    butil::Status set_read_barrier(const int64_t index);
+    
+    // user trigger resume.
+    // done is user defined function, maybe handle some errors.
+    // Load snapshot and continue apply entries.
+    void resume(Closure* done);
+
+    // user trigger reset.
+    // done is user defined function, maybe handle some errors.
+    // Stop apply entries, and reset the state machine.
+    // Stop apply entries, and reset the state machine.
+    void reset(Closure* done);
+
+    // Get the internal status of this learner, the information is mostly the same as we
+    // see from the website.
+    void get_status(NodeStatus* status);
+private:
+    LearnerImpl* _impl;
+};
+    
 // Bootstrap a non-empty raft node, 
 int bootstrap(const BootstrapOptions& options);
 

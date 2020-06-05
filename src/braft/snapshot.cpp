@@ -34,6 +34,9 @@
 
 namespace braft {
 
+DEFINE_int32(raft_reserved_snapshot_num, 1, "Max num of reserved snapshot");
+BRPC_VALIDATE_GFLAG(raft_reserved_snapshot_num, brpc::PositiveInteger);
+
 const char* LocalSnapshotStorage::_s_temp_path = "temp";
 
 LocalSnapshotMetaTable::LocalSnapshotMetaTable() {}
@@ -270,6 +273,11 @@ int LocalSnapshotWriter::save_meta(const SnapshotMeta& meta) {
     return 0;
 }
 
+int LocalSnapshotWriter::get_meta(SnapshotMeta* meta) {
+    meta->CopyFrom(_meta_table.meta());
+    return 0;
+}
+
 int LocalSnapshotWriter::sync() {
     const int rc = _meta_table.save_to_file(_fs, _path + "/" BRAFT_SNAPSHOT_META_FILE);
     if (rc != 0 && ok()) {
@@ -439,7 +447,9 @@ void LocalSnapshotReader::destroy_reader_in_file_service() {
 
 LocalSnapshotStorage::LocalSnapshotStorage(const std::string& path)
     : _path(path)
+    , _first_snapshot_index(0)
     , _last_snapshot_index(0)
+    , _reserved_snapshot_num(FLAGS_raft_reserved_snapshot_num)
 {}
 
 LocalSnapshotStorage::~LocalSnapshotStorage() {
@@ -480,39 +490,38 @@ int LocalSnapshotStorage::init() {
         int match = sscanf(dir_reader->name(), BRAFT_SNAPSHOT_PATTERN, &index);
         if (match == 1) {
             snapshots.insert(index);
+            LOG(INFO) << "Found snapshot " << dir_reader->name();
         }
     }
     delete dir_reader;
 
     // TODO: add snapshot watcher
 
-    // get last_snapshot_index
-    if (snapshots.size() > 0) {
-        size_t snapshot_count = snapshots.size();
-        for (size_t i = 0; i < snapshot_count - 1; i++) {
-            int64_t index = *snapshots.begin();
-            snapshots.erase(index);
-
-            std::string snapshot_path(_path);
-            butil::string_appendf(&snapshot_path, "/" BRAFT_SNAPSHOT_PATTERN, index);
-            LOG(INFO) << "Deleting snapshot `" << snapshot_path << "'";
-            // TODO: Notify Watcher before delete directories.
-            if (!_fs->delete_file(snapshot_path, true)) {
-                LOG(WARNING) << "delete old snapshot path failed, path " << snapshot_path;
-                return EIO;
-            }
-        }
-
-        _last_snapshot_index = *snapshots.begin();
-        ref(_last_snapshot_index);
+    if (snapshots.size() == 0) {
+        return 0;
     }
+
+    // ref all snapshots
+    _first_snapshot_index = *snapshots.begin();
+    _last_snapshot_index = *snapshots.rbegin();
+    for (std::set<int64_t>::iterator it = snapshots.begin(); it != snapshots.end(); ++it) {
+        ref(*it);
+    }
+    unref_stale_snapshots(_last_snapshot_index);
 
     return 0;
 }
 
 void LocalSnapshotStorage::ref(const int64_t index) {
     BAIDU_SCOPED_LOCK(_mutex);
-    _ref_map[index]++;
+    std::map<int64_t, std::pair<int, bool> >::iterator it = _ref_map.find(index);
+    if (it == _ref_map.end()) {
+        std::pair<int, bool>& snapshot_info = _ref_map[index];
+        snapshot_info.first = 1;
+        snapshot_info.second = false;
+    } else {
+        it->second.first++;
+    }
 }
 
 int LocalSnapshotStorage::destroy_snapshot(const std::string& path) {
@@ -526,17 +535,56 @@ int LocalSnapshotStorage::destroy_snapshot(const std::string& path) {
 
 void LocalSnapshotStorage::unref(const int64_t index) {
     std::unique_lock<raft_mutex_t> lck(_mutex);
-    std::map<int64_t, int>::iterator it = _ref_map.find(index);
+    std::map<int64_t, std::pair<int, bool> >::iterator it = _ref_map.find(index);
     if (it != _ref_map.end()) {
-        it->second--;
+        it->second.first--;
 
-        if (it->second == 0) {
+        if (it->second.first == 0) {
             _ref_map.erase(it);
             lck.unlock();
             std::string old_path(_path);
             butil::string_appendf(&old_path, "/" BRAFT_SNAPSHOT_PATTERN, index);
             destroy_snapshot(old_path);
         }
+    }
+}
+
+void LocalSnapshotStorage::unref_stale_snapshots(const int64_t& last_snapshot_index) {
+    std::unique_lock<raft_mutex_t> lck(_mutex);
+    int reserved_count = 0;
+    std::vector<int64_t> destroy_list;
+
+    int64_t min_kept_index = 0;
+    std::map<int64_t, std::pair<int, bool> >::iterator it = _ref_map.begin();
+    while (it != _ref_map.end()) {
+        if (it->second.second) {
+            ++it;
+            continue;
+        }
+        if (reserved_count < _reserved_snapshot_num || it->first >= last_snapshot_index) {
+            min_kept_index = it->first;
+            reserved_count++;
+            ++it;
+            continue;
+        }
+
+        it->second.first--;
+        it->second.second = true;
+        LOG(INFO) << "Try to destroy snapshot " << it->first;
+        if (it->second.first == 0) {
+            destroy_list.push_back(it->first);
+            _ref_map.erase(it++);
+        } else {
+            ++it;
+        }
+    }
+    _first_snapshot_index = min_kept_index;
+    lck.unlock();
+
+    for (size_t i = 0; i < destroy_list.size(); ++i) {
+        std::string old_path(_path);
+        butil::string_appendf(&old_path, "/" BRAFT_SNAPSHOT_PATTERN, destroy_list[i]);
+        destroy_snapshot(old_path);
     }
 }
 
@@ -575,9 +623,19 @@ SnapshotWriter* LocalSnapshotStorage::create(bool from_empty) {
 }
 
 SnapshotCopier* LocalSnapshotStorage::start_to_copy_from(const std::string& uri) {
+    return start_to_copy_from(uri, NULL);
+}
+
+SnapshotCopier* LocalSnapshotStorage::start_to_copy_from(const std::string& uri, 
+                                                         SnapshotWriter* writer) {
     LocalSnapshotCopier* copier = new LocalSnapshotCopier();
     copier->_storage = this;
     copier->_filter_before_copy_remote = _filter_before_copy_remote;
+    if (writer) {
+        copier->_writer = static_cast<LocalSnapshotWriter*>(writer);
+        copier->_owns_writer = false;
+        copier->_filter_before_copy_remote = false;
+    }
     copier->_fs = _fs.get();
     copier->_throttle = _snapshot_throttle.get();
     if (copier->init(uri) != 0) {
@@ -660,7 +718,7 @@ int LocalSnapshotStorage::close(SnapshotWriter* writer_base,
             _last_snapshot_index = new_index;
         }
         // unref old_index, ref new_index
-        unref(old_index);
+        unref_stale_snapshots(new_index);
     } while (0);
 
     if (ret != 0 && !keep_data_on_error) {
@@ -674,7 +732,7 @@ SnapshotReader* LocalSnapshotStorage::open() {
     std::unique_lock<raft_mutex_t> lck(_mutex);
     if (_last_snapshot_index != 0) {
         const int64_t last_snapshot_index = _last_snapshot_index;
-        ++_ref_map[last_snapshot_index];
+        ++_ref_map[last_snapshot_index].first;
         lck.unlock();
         std::string snapshot_path(_path);
         butil::string_appendf(&snapshot_path, "/" BRAFT_SNAPSHOT_PATTERN, last_snapshot_index);
@@ -741,6 +799,7 @@ LocalSnapshotCopier::LocalSnapshotCopier()
     : _tid(INVALID_BTHREAD)
     , _cancelled(false)
     , _filter_before_copy_remote(false)
+    , _owns_writer(true)
     , _fs(NULL)
     , _throttle(NULL)
     , _writer(NULL)
@@ -784,12 +843,12 @@ void LocalSnapshotCopier::copy() {
     if (_writer) {
         // set_error for copier only when failed to close writer and copier was 
         // ok before this moment 
-        if (_storage->close(_writer, _filter_before_copy_remote) != 0 && ok()) {
+        if (_owns_writer && _storage->close(_writer, _filter_before_copy_remote) != 0 && ok()) {
             set_error(EIO, "Fail to close writer");
         }
         _writer = NULL;
     }
-    if (ok()) {
+    if (_owns_writer && ok()) {
         _reader = _storage->open();
     }
 }
@@ -912,13 +971,15 @@ int LocalSnapshotCopier::filter_before_copy(LocalSnapshotWriter* writer,
 }
 
 void LocalSnapshotCopier::filter() {
-    _writer = (LocalSnapshotWriter*)_storage->create(!_filter_before_copy_remote);
+    if (!_writer) {
+        _writer = (LocalSnapshotWriter*)_storage->create(!_filter_before_copy_remote);
+    }
     if (_writer == NULL) {
         set_error(EIO, "Fail to create snapshot writer");
         return;
     }
 
-    if (_filter_before_copy_remote) {
+    if (_filter_before_copy_remote && _owns_writer) {
         SnapshotReader* reader = _storage->open();
         if (filter_before_copy(_writer, reader) != 0) {
             LOG(WARNING) << "Fail to filter writer before copying"

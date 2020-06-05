@@ -65,7 +65,8 @@ class MockLogManager : public braft::LogManager {
 protected:
     // Notify the log manager about the latest snapshot, which indicates the
     // logs which can be safely truncated.
-    BRAFT_MOCK void set_snapshot(const SnapshotMeta* /*meta*/) {
+    BRAFT_MOCK void set_snapshot(const SnapshotMeta* /*meta*/,
+                                const int64_t& first_snapshot_index) {
         _set_times.fetch_add(1);
     }
 

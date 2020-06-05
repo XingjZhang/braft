@@ -316,6 +316,18 @@ public:
         return -1;
     }
 
+    virtual int64_t first_snapshot_index() {
+        CHECK(false) << butil::class_name_str(*this)
+            << " doesn't support first snapshot index";
+        return -1;
+    }
+
+    virtual int64_t last_snapshot_index() {
+        CHECK(false) << butil::class_name_str(*this)
+            << " doesn't support last snapshot index";
+        return -1;
+    }
+
     // Initialize
     virtual int init() = 0;
 
@@ -334,6 +346,11 @@ public:
     // Copy snapshot from uri and open it as a SnapshotReader
     virtual SnapshotReader* copy_from(const std::string& uri) WARN_UNUSED_RESULT = 0;
     virtual SnapshotCopier* start_to_copy_from(const std::string& uri) = 0;
+    virtual SnapshotCopier* start_to_copy_from(const std::string& uri, SnapshotWriter* writer) { 
+        CHECK(false) << butil::class_name_str(*this)
+                     << " didn't implement start_to_copy_from interface with writer";
+        return NULL; 
+    }
     virtual int close(SnapshotCopier* copier) = 0;
 
     // Create an instance of this kind of SnapshotStorage with the parameters encoded 

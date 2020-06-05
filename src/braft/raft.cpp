@@ -21,6 +21,7 @@
 #include <butil/class_name.h>
 #include "braft/raft.h"
 #include "braft/node.h"
+#include "braft/learner.h"
 #include "braft/storage.h"
 #include "braft/node_manager.h"
 #include "braft/log.h"
@@ -242,6 +243,55 @@ bool Node::readonly() {
     return _impl->readonly();
 }
 
+// ------------- Learner
+Learner::Learner(const GroupId& group_id, const PeerId& peer_id) {
+    _impl = new LearnerImpl(group_id, peer_id);
+}
+
+Learner::~Learner() {
+    if (_impl) {
+        _impl->shutdown(NULL);
+        _impl->join();
+        _impl->Release();
+        _impl = NULL;
+    }
+}
+
+NodeId Learner::node_id() {
+    return _impl->node_id();
+}
+
+int Learner::init(const NodeOptions& options) {
+    return _impl->init(options);
+}
+
+void Learner::shutdown(Closure* done) {
+    _impl->shutdown(done);
+}
+
+void Learner::join() {
+    _impl->join();
+}
+
+void Learner::snapshot(Closure* done) {
+    _impl->snapshot(done);
+}
+
+butil::Status Learner::set_read_barrier(const int64_t index) {
+    return _impl->set_read_barrier(index);
+}
+
+void Learner::get_status(NodeStatus* status) {
+    return _impl->get_status(status);
+}
+
+void Learner::resume(Closure* done) {
+    _impl->resume(done);
+}
+
+void Learner::reset(Closure* done) {
+    _impl->reset(done);
+}
 // ------------- Iterator
 void Iterator::next() {
     if (valid()) {
@@ -291,6 +341,14 @@ int StateMachine::on_snapshot_load(SnapshotReader* reader) {
     return -1;
 }
 
+int StateMachine::on_snapshot_fetched(SnapshotReader* reader) {
+    (void)reader;
+    LOG(ERROR) << butil::class_name_str(*this)
+               << " didn't implement on_snapshot_fetched"
+               << " while a snapshot is saved in " << reader->get_path();
+    return -1;
+}
+
 void StateMachine::on_leader_start(int64_t) {}
 void StateMachine::on_leader_stop(const butil::Status&) {}
 void StateMachine::on_error(const Error& e) {
@@ -313,6 +371,7 @@ void StateMachine::on_configuration_committed(const Configuration& conf, int64_t
 
 void StateMachine::on_stop_following(const LeaderChangeContext&) {}
 void StateMachine::on_start_following(const LeaderChangeContext&) {}
+void StateMachine::on_reset() {}
 
 BootstrapOptions::BootstrapOptions()
     : last_log_index(0)

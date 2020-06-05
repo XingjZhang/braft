@@ -43,7 +43,7 @@ void RaftServiceImpl::pre_vote(google::protobuf::RpcController* cntl_base,
     }
 
     scoped_refptr<NodeImpl> node_ptr = 
-                        global_node_manager->get(request->group_id(), peer_id);
+                        global_node_manager->get_node(request->group_id(), peer_id);
     NodeImpl* node = node_ptr.get();
     if (!node) {
         cntl->SetFailed(ENOENT, "peer_id not exist");
@@ -73,7 +73,7 @@ void RaftServiceImpl::request_vote(google::protobuf::RpcController* cntl_base,
     }
 
     scoped_refptr<NodeImpl> node_ptr = 
-                        global_node_manager->get(request->group_id(), peer_id);
+                        global_node_manager->get_node(request->group_id(), peer_id);
     NodeImpl* node = node_ptr.get();
     if (!node) {
         cntl->SetFailed(ENOENT, "peer_id not exist");
@@ -102,7 +102,7 @@ void RaftServiceImpl::append_entries(google::protobuf::RpcController* cntl_base,
     }
 
     scoped_refptr<NodeImpl> node_ptr = 
-                        global_node_manager->get(request->group_id(), peer_id);
+                        global_node_manager->get_node(request->group_id(), peer_id);
     NodeImpl* node = node_ptr.get();
     if (!node) {
         cntl->SetFailed(ENOENT, "peer_id not exist");
@@ -128,7 +128,7 @@ void RaftServiceImpl::install_snapshot(google::protobuf::RpcController* cntl_bas
     }
 
     scoped_refptr<NodeImpl> node_ptr = 
-                        global_node_manager->get(request->group_id(), peer_id);
+                        global_node_manager->get_node(request->group_id(), peer_id);
     NodeImpl* node = node_ptr.get();
     if (!node) {
         cntl->SetFailed(ENOENT, "peer_id not exist");
@@ -155,7 +155,7 @@ void RaftServiceImpl::timeout_now(::google::protobuf::RpcController* controller,
     }
 
     scoped_refptr<NodeImpl> node_ptr = 
-                        global_node_manager->get(request->group_id(), peer_id);
+                        global_node_manager->get_node(request->group_id(), peer_id);
     NodeImpl* node = node_ptr.get();
     if (!node) {
         cntl->SetFailed(ENOENT, "peer_id not exist");
@@ -164,6 +164,56 @@ void RaftServiceImpl::timeout_now(::google::protobuf::RpcController* controller,
     }
 
     node->handle_timeout_now_request(cntl, request, response, done);
+}
+
+void RaftServiceImpl::explore(::google::protobuf::RpcController* controller,
+                              const ::braft::ExploreRequest* request,
+                              ::braft::ExploreResponse* response,
+                              ::google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl =
+        static_cast<brpc::Controller*>(controller);
+
+    PeerId peer_id;
+    if (0 != peer_id.parse(request->peer_id())) {
+        cntl->SetFailed(EINVAL, "peer_id invalid");
+        return;
+    }
+
+    scoped_refptr<NodeImpl> node_ptr = NodeManager::GetInstance()->get_node(request->group_id(),
+                                                                       peer_id);
+    NodeImpl* node = node_ptr.get();
+    if (!node) {
+        cntl->SetFailed(ENOENT, "peer_id not exist");
+        return;
+    }
+
+    node->handle_explore(request, response);
+}
+
+void RaftServiceImpl::read_committed_logs(::google::protobuf::RpcController* controller,
+                                          const ::braft::ReadCommittedLogsRequest* request,
+                                          ::braft::ReadCommittedLogsResponse* response,
+                                          ::google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl =
+        static_cast<brpc::Controller*>(controller);
+
+    PeerId peer_id;
+    if (0 != peer_id.parse(request->peer_id())) {
+        cntl->SetFailed(EINVAL, "peer_id invalid");
+        return;
+    }
+
+    scoped_refptr<NodeImpl> node_ptr = NodeManager::GetInstance()->get_node(request->group_id(),
+                                                                            peer_id);
+    NodeImpl* node = node_ptr.get();
+    if (!node) {
+        cntl->SetFailed(ENOENT, "peer_id not exist");
+        return;
+    }
+
+    return node->handle_read_committed_logs(cntl, request, response);
 }
 
 }

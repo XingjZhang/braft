@@ -36,6 +36,7 @@
 #include "braft/closure_queue.h"
 #include "braft/configuration_manager.h"
 #include "braft/repeated_timer_task.h"
+#include "braft/snapshot_service.h"
 
 namespace braft {
 
@@ -144,6 +145,11 @@ public:
     // trigger snapshot
     void snapshot(Closure* done);
 
+    // trigger fetch snapshot
+    void fetch_snapshot(const PeerId& peer_id, const int64_t max_snapshot_index, 
+            SnapshotWriter* writer, Closure* done);
+    void cancel_fetch_snapshot();
+
     // trigger vote
     butil::Status vote(int election_timeout);
 
@@ -177,6 +183,17 @@ public:
                                     const TimeoutNowRequest* request,
                                     TimeoutNowResponse* response,
                                     google::protobuf::Closure* done);
+
+    int handle_explore(const ExploreRequest* request, ExploreResponse* response);
+
+    void handle_read_committed_logs(brpc::Controller *cntl,
+                                    const ReadCommittedLogsRequest* request,
+                                    ReadCommittedLogsResponse* response);
+
+    void handle_tail_snapshot(brpc::Controller *cntl,
+                              const TailSnapshotRequest* request,
+                              TailSnapshotResponse* response);
+
     // timer func
     void handle_election_timeout();
     void handle_vote_timeout();

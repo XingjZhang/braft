@@ -21,13 +21,14 @@
 #include <braft/protobuf_file.h>         // braft::ProtoBufFile
 #include "counter.pb.h"                 // CounterService
 
+DEFINE_bool(learner_mode, false, "learner_mode");
 DEFINE_bool(check_term, true, "Check if the leader changed to another term");
 DEFINE_bool(disable_cli, false, "Don't allow raft_cli access this node");
 DEFINE_bool(log_applied_task, false, "Print notice log when a task is applied");
 DEFINE_int32(election_timeout_ms, 5000, 
             "Start election in such milliseconds if disconnect with the leader");
 DEFINE_int32(port, 8100, "Listen port of this peer");
-DEFINE_int32(snapshot_interval, 30, "Interval between each snapshot");
+DEFINE_int32(snapshot_interval, 0, "Interval between each snapshot");
 DEFINE_string(conf, "", "Initial configuration of the replication group");
 DEFINE_string(data_path, "./data", "Path of data stored on");
 DEFINE_string(group, "Counter", "Id of the replication group");
@@ -88,6 +89,7 @@ public:
         node_options.raft_meta_uri = prefix + "/raft_meta";
         node_options.snapshot_uri = prefix + "/snapshot";
         node_options.disable_cli = FLAGS_disable_cli;
+        node_options.learner_mode = FLAGS_learner_mode;
         braft::Node* node = new braft::Node(FLAGS_group, braft::PeerId(addr));
         if (node->init(node_options) != 0) {
             LOG(ERROR) << "Fail to init raft node";

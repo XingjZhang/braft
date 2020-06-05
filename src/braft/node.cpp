@@ -1113,6 +1113,77 @@ void NodeImpl::handle_timeout_now_request(brpc::Controller* controller,
 
 }
 
+int NodeImpl::handle_explore(const ExploreRequest* request, ExploreResponse* response) {
+    response->set_success(true);
+    response->set_last_snapshot_index(_snapshot_executor->last_snapshot_index());
+    response->set_last_committed_index(_ballot_box->last_committed_index());
+    response->set_server_id(_server_id.to_string());
+    response->set_leader_id(_leader_id.to_string());
+    LOG(INFO) << "node " << _group_id << ":" << _server_id 
+              << " handle explore, last_snapshot_index:" << response->last_snapshot_index()
+              << ", last_committed_index:" << response->last_committed_index()
+              << ", leader_id:" << response->leader_id();
+    return 0;
+}
+
+void NodeImpl::handle_read_committed_logs(brpc::Controller *cntl,
+                                          const ReadCommittedLogsRequest* request,
+                                          ReadCommittedLogsResponse* response) {
+    const int64_t last_committed_index = _ballot_box->last_committed_index();
+    if (request->first_index() > last_committed_index) {
+        cntl->SetFailed(ENOMOREUSERLOG, "request index:%ld is greater"
+                        " than last_committed_index:%ld.", 
+                        request->first_index(), last_committed_index);
+        return;
+    }
+
+    int64_t count = std::min(last_committed_index - request->first_index() + 1, request->count());
+    std::vector<LogEntry*> entry_list;
+    int ret = _log_manager->get_entries(request->first_index(), count, FLAGS_raft_max_body_size,
+                                        &entry_list);
+    if (ret < 0) {
+        response->set_success(false);
+        return;
+    }
+
+    response->set_success(true);
+    butil::IOBuf& data = cntl->response_attachment();
+    for (size_t i = 0; i < entry_list.size(); ++i) {
+        LogEntry* entry = entry_list[i];
+        EntryMeta* meta = response->add_entries();
+        meta->set_term(entry->id.term);
+        meta->set_type(entry->type);
+        if (entry->peers != NULL) {
+            for (size_t i = 0; i < entry->peers->size(); ++i) {
+                meta->add_peers((*entry->peers)[i].to_string());
+            }
+        }
+        if (entry->old_peers != NULL) {
+            for (size_t i = 0; i < entry->old_peers->size(); ++i) {
+                meta->add_old_peers((*entry->old_peers)[i].to_string());
+            }
+        }
+        meta->set_data_len(entry->data.length());
+        data.append(entry->data);
+        entry->Release();
+    }
+    entry_list.clear();
+    LOG(INFO) << "node " << _group_id << ":" << _server_id
+              << " succ to get entries, first_index:" << request->first_index()
+              << ", count:" << request->count() << ", num:" << response->entries_size()
+              << ", last_committed_index:" << last_committed_index;
+}
+
+void NodeImpl::handle_tail_snapshot(brpc::Controller* cntl,
+                                    const TailSnapshotRequest* request,
+                                    TailSnapshotResponse* response) {
+    if (_snapshot_executor) {
+        _snapshot_executor->handle_tail_snapshot(cntl, request, response);
+    } else {
+        cntl->SetFailed(EINVAL, "Snapshot is not supported");
+    }
+}
+
 class StopTransferArg {
 DISALLOW_COPY_AND_ASSIGN(StopTransferArg);
 public:
@@ -2650,6 +2721,7 @@ butil::Status NodeImpl::read_committed_user_log(const int64_t index, UserLog* us
     do {
         if (entry->type == ENTRY_TYPE_DATA) {
             user_log->set_log_index(cur_index);
+            user_log->set_log_term(entry->id.term);
             user_log->set_log_data(entry->data);
             entry->Release();
             return butil::Status();
@@ -2829,6 +2901,10 @@ void NodeImpl::get_status(NodeStatus* status) {
     status->pending_queue_size = ballot_box_status.pending_queue_size;
 
     status->applying_index = _fsm_caller->applying_index();
+
+    if (_snapshot_executor) {
+        status->last_snapshot_index = _snapshot_executor->last_snapshot_index();
+    }
     
     if (replicators.size() == 0) {
         return;
@@ -3602,6 +3678,23 @@ int64_t NodeImpl::last_leader_active_timestamp(const Configuration& conf) {
     }
     std::pop_heap(last_rpc_send_timestamps.begin(), last_rpc_send_timestamps.end(), compare);
     return last_rpc_send_timestamps.back();
+}
+
+void NodeImpl::fetch_snapshot(const PeerId& peer_id, const int64_t max_snapshot_index, 
+        SnapshotWriter* writer, Closure* done) {
+    if (!_snapshot_executor) {
+        done->status().set_error(EINVAL, "snapshot is not supported");
+        done->Run();
+        return;
+    }
+    _snapshot_executor->fetch_snapshot(_group_id, peer_id, max_snapshot_index, writer, done);
+}
+
+void NodeImpl::cancel_fetch_snapshot() {
+    if (!_snapshot_executor) {
+        return;
+    }
+    _snapshot_executor->cancel_fetch_snapshot(false);
 }
 
 // Timers

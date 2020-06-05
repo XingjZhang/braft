@@ -35,6 +35,8 @@ class BallotBox;
 class NodeImpl;
 class SnapshotThrottle;
 
+DECLARE_int32(raft_max_body_size);
+
 // A shared structure to store some high-frequency replicator statuses, for reducing
 // the lock contention between Replicator and NodeImpl.
 struct ReplicatorStatus : public butil::RefCountedThreadSafe<ReplicatorStatus> {

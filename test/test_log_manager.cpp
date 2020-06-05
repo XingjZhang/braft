@@ -496,7 +496,7 @@ TEST_F(LogManagerTest, set_snapshot) {
     braft::SnapshotMeta meta;
     meta.set_last_included_index(1000);
     meta.set_last_included_term(2);
-    lm->set_snapshot(&meta);
+    lm->set_snapshot(&meta, meta.last_included_index());
     ASSERT_EQ(braft::LogId(1000, 2), lm->last_log_id(false));
 }
 
@@ -563,7 +563,7 @@ TEST_F(LogManagerTest, flush_and_get_last_id) {
         braft::SnapshotMeta meta;
         meta.set_last_included_index(100);
         meta.set_last_included_term(100);
-        lm->set_snapshot(&meta);
+        lm->set_snapshot(&meta, meta.last_included_index());
         ASSERT_EQ(braft::LogId(100, 100), lm->last_log_id(false));
         ASSERT_EQ(braft::LogId(100, 100), lm->last_log_id(true));
     }
@@ -581,7 +581,7 @@ TEST_F(LogManagerTest, flush_and_get_last_id) {
         braft::SnapshotMeta meta;
         meta.set_last_included_index(100);
         meta.set_last_included_term(100);
-        lm->set_snapshot(&meta);
+        lm->set_snapshot(&meta, meta.last_included_index());
         ASSERT_EQ(braft::LogId(100, 100), lm->last_log_id(false));
         ASSERT_EQ(braft::LogId(100, 100), lm->last_log_id(true));
     }
@@ -610,7 +610,7 @@ TEST_F(LogManagerTest, check_consistency) {
         ASSERT_TRUE(st.ok()) << st;
         meta.set_last_included_index(100);
         meta.set_last_included_term(1);
-        lm->set_snapshot(&meta);
+        lm->set_snapshot(&meta, meta.last_included_index());
         st = lm->check_consistency();
         ASSERT_TRUE(st.ok()) << st;
         lm->clear_bufferred_logs();
@@ -650,7 +650,7 @@ TEST_F(LogManagerTest, truncate_suffix_to_last_snapshot) {
     braft::SnapshotMeta meta;
     meta.set_last_included_index(1000);
     meta.set_last_included_term(2);
-    lm->set_snapshot(&meta);
+    lm->set_snapshot(&meta, meta.last_included_index());
     ASSERT_EQ(braft::LogId(1000, 2), lm->last_log_id(true));
     ASSERT_EQ(0, append_entry(lm.get(), "dummy2", 1001, 2));
     ASSERT_EQ(0, append_entry(lm.get(), "dummy3", 1001, 3));
@@ -675,8 +675,8 @@ TEST_F(LogManagerTest, set_snapshot_and_get_log_term) {
     braft::SnapshotMeta meta;
     meta.set_last_included_index(N - 1);
     meta.set_last_included_term(1);
-    lm->set_snapshot(&meta);
-    lm->set_snapshot(&meta);
+    lm->set_snapshot(&meta, meta.last_included_index());
+    lm->set_snapshot(&meta, meta.last_included_index());
     ASSERT_EQ(braft::LogId(N, 1), lm->last_log_id());
     ASSERT_EQ(1L, lm->get_term(N - 1));
     LOG(INFO) << "Last_index=" << lm->last_log_index();

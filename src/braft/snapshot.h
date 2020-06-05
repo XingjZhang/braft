@@ -21,6 +21,7 @@
 #define BRAFT_RAFT_SNAPSHOT_H
 
 #include <string>
+#include <gflags/gflags.h>
 #include "braft/storage.h"
 #include "braft/macros.h"
 #include "braft/local_file_meta.pb.h"
@@ -64,6 +65,7 @@ public:
     int64_t snapshot_index();
     virtual int init();
     virtual int save_meta(const SnapshotMeta& meta);
+    virtual int get_meta(SnapshotMeta* meta);
     virtual std::string get_path() { return _path; }
     // Add file to the snapshot. It would fail it the file doesn't exist nor
     // references to any other file.
@@ -166,6 +168,7 @@ private:
     bthread_t _tid;
     bool _cancelled;
     bool _filter_before_copy_remote;
+    bool _owns_writer;
     FileSystemAdaptor* _fs;
     SnapshotThrottle* _throttle;
     LocalSnapshotWriter* _writer;
@@ -194,10 +197,13 @@ public:
     virtual int close(SnapshotReader* reader);
     virtual SnapshotReader* copy_from(const std::string& uri) WARN_UNUSED_RESULT;
     virtual SnapshotCopier* start_to_copy_from(const std::string& uri);
+    virtual SnapshotCopier* start_to_copy_from(const std::string& uri, SnapshotWriter* writer);
     virtual int close(SnapshotCopier* copier);
     virtual int set_filter_before_copy_remote();
     virtual int set_file_system_adaptor(FileSystemAdaptor* fs);
     virtual int set_snapshot_throttle(SnapshotThrottle* snapshot_throttle);
+    virtual int64_t first_snapshot_index() { return _first_snapshot_index; }
+    virtual int64_t last_snapshot_index() { return _last_snapshot_index; }
 
     SnapshotStorage* new_instance(const std::string& uri) const;
     butil::Status gc_instance(const std::string& uri) const;
@@ -210,12 +216,16 @@ private:
     int close(SnapshotWriter* writer, bool keep_data_on_error);
     void ref(const int64_t index);
     void unref(const int64_t index);
+    void unref_stale_snapshots(const int64_t& last_snapshot_index);
 
     raft_mutex_t _mutex;
     std::string _path;
     bool _filter_before_copy_remote;
+    int64_t _first_snapshot_index;
     int64_t _last_snapshot_index;
-    std::map<int64_t, int> _ref_map;
+    int _reserved_snapshot_num;
+    // <snapshot_index, <ref, is_destoryed>, comparator>
+    std::map<int64_t, std::pair<int, bool>, std::greater<int64_t> > _ref_map;
     butil::EndPoint _addr;
     scoped_refptr<FileSystemAdaptor> _fs;
     scoped_refptr<SnapshotThrottle> _snapshot_throttle;

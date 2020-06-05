@@ -205,8 +205,7 @@ void CliServiceImpl::get_leader(::google::protobuf::RpcController* controller,
                                     request->peer_id().c_str());
             return;
         }
-        scoped_refptr<NodeImpl> node = 
-                            global_node_manager->get(request->group_id(), peer);
+        scoped_refptr<NodeImpl> node = global_node_manager->get_node(request->group_id(), peer);
         if (node) {
             nodes.push_back(node);
         }
@@ -233,7 +232,7 @@ butil::Status CliServiceImpl::get_node(scoped_refptr<NodeImpl>* node,
                                       const GroupId& group_id,
                                       const std::string& peer_id) {
     if (!peer_id.empty()) {
-        *node = global_node_manager->get(group_id, peer_id);
+        *node = global_node_manager->get_node(group_id, peer_id);
         if (!(*node)) {
             return butil::Status(ENOENT, "Fail to find node %s in group %s",
                                          peer_id.c_str(),
